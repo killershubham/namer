@@ -225,6 +225,7 @@ def process_file(command: Command) -> Optional[Command]:
 
                     audio = ffprobe_results.get_default_audio_stream()
                     new_metadata.audio_codec = audio.codec_name if audio else None
+                    new_metadata.fps = ffprobe_results.get_fps() # <--- ADD THIS LINE
 
                 if command.config.send_phash:
                     phash = phash if phash else calculate_phash(command.target_movie_file, command.config)

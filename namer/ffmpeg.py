@@ -118,6 +118,34 @@ class FFProbeResults:
             return stream.height if stream.height else 0
 
         return None
+        
+
+    def get_fps(self) -> Optional[str]:
+        """
+        Returns a formatted string of the video's frames per second, rounded to the nearest integer.
+        e.g., "30fps"
+        """
+        video = self.get_default_video_stream()
+        if video and hasattr(video, 'avg_frame_rate') and video.avg_frame_rate:
+            frame_rate_val = video.avg_frame_rate
+            
+            # --- NEW ROBUST TYPE CHECKING ---
+            try:
+                # Case 1: The frame rate is a string fraction (e.g., "30000/1001")
+                if isinstance(frame_rate_val, str) and '/' in frame_rate_val:
+                    num, den = map(int, frame_rate_val.split('/'))
+                    if den > 0:
+                        fps_val = round(num / den)
+                        return f"{fps_val}fps"
+                # Case 2: The frame rate is a number (float or int) or a string number.
+                else:
+                    fps_val = round(float(frame_rate_val))
+                    return f"{fps_val}fps"
+            except (ValueError, ZeroDivisionError, TypeError):
+                logger.warning("Could not parse avg_frame_rate value: {}", frame_rate_val)
+                pass # Could not parse the value, will return None.
+
+        return None
 
 
 class FFMpeg:

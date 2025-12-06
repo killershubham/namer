@@ -14,6 +14,10 @@ from platform import system
 from queue import Queue
 from threading import Thread
 from typing import Optional
+from typing import Optional
+from datetime import datetime, timedelta  # <-- ADD THIS
+from dataclasses import dataclass, field    # <-- ADD THIS
+
 
 import schedule
 from loguru import logger
@@ -36,7 +40,18 @@ def __is_file_in_use_windows(file: Path):
         return True
     else:
         return False
+# --- ADD THIS ENTIRE HEARTBEAT MECHANISM ---
+@dataclass
+class ActivityHeartbeat:
+    """A simple mutable object to hold the last activity timestamp."""
+    last_activity: datetime = field(default_factory=datetime.now)
 
+heartbeat = ActivityHeartbeat()
+
+def update_last_activity_time(message):
+    """A Loguru sink function that updates the global heartbeat on every log message."""
+    heartbeat.last_activity = datetime.now()
+# --- END OF NEW BLOCK ---
 
 def __is_file_in_use_unix(file: Path):
     try:
@@ -121,9 +136,15 @@ class MovieEventHandler(PatternMatchingEventHandler):
         self.__command_queue = command_queue
 
     def on_any_event(self, event: FileSystemEvent):
+        # --- NEW LOGIC: THROTTLE BASED ON QUEUE SIZE ---
+        if self.__namer_config.queue_limit > 0:
+            while self.__command_queue.qsize() >= self.__namer_config.queue_limit:
+                logger.debug("Work queue is full (size: {}). Waiting before processing new file events...", self.__command_queue.qsize())
+                time.sleep(self.__namer_config.queue_sleep_time)
+
         file_path = None
         if event.event_type == EVENT_TYPE_MOVED:
-            file_path = event.dest_path  # type: ignore
+            file_path = event.dest_path
         elif event.event_type != EVENT_TYPE_MODIFIED:
             file_path = event.src_path
 
@@ -137,13 +158,8 @@ class MovieEventHandler(PatternMatchingEventHandler):
             if not self.__namer_config.ignored_dir_regex.search(relative_path) and is_interesting_movie(path, self.__namer_config) and done_copying(path):
                 logger.info('watchdog process called for {}', relative_path)
 
-                # Extra wait time in case other files are copies in as well.
                 if self.__namer_config.del_other_files:
                     time.sleep(self.__namer_config.extra_sleep_time)
-
-                if self.__namer_config.queue_limit > 0:
-                    while self.__command_queue.qsize() >= self.__namer_config.queue_limit:
-                        time.sleep(self.__namer_config.queue_sleep_time)
 
                 self.prepare_file_for_processing(path)
 
@@ -211,6 +227,24 @@ class MovieWatcher:
         needed if running in docker as events aren't properly passed in.
         """
         if not self.__started:
+            # --- NEW LOGIC: AUTOMATIC STARTUP RECOVERY ---
+            logger.info("Checking for stranded files in the work directory...")
+            work_files = [f for f in self.__namer_config.work_dir.iterdir() if f.is_file()]
+            if work_files:
+                logger.warning(
+                    "Found {} stranded file(s) in {}. Moving them back to the watch directory for reprocessing.",
+                    len(work_files), self.__namer_config.work_dir
+                )
+                for work_file in work_files:
+                    try:
+                        destination = self.__namer_config.watch_dir / work_file.name
+                        shutil.move(str(work_file), str(destination))
+                        logger.info("Recovered stranded file: {} -> {}", work_file, destination)
+                    except Exception as e:
+                        logger.error("Could not move stranded file {}: {}", work_file, e)
+            else:
+                logger.info("Work directory is clean. No recovery needed.")
+            
             self.start()
             if self.__namer_config.web:
                 self.__webserver = NamerWebServer(self.__namer_config, self.__command_queue)
@@ -218,6 +252,18 @@ class MovieWatcher:
 
             try:
                 while not self.__stopped:
+                    # --- NEW MONITOR LOGIC ---
+                    now = datetime.now()
+                    inactivity_duration = now - heartbeat.last_activity
+                    # If inactive for 15 mins AND there's work to do, restart.
+                    if inactivity_duration > timedelta(minutes=15) and not self.__command_queue.empty():
+                        logger.critical(
+                            "No activity detected for over 15 minutes while work is in the queue. "
+                            "The process appears to be frozen. Forcing a restart."
+                        )
+                        # Safely restart the application.
+                        os.execl(sys.executable, sys.executable, *sys.argv)
+                    
                     schedule.run_pending()
                     time.sleep(3)
                 self.stop()
@@ -332,30 +378,22 @@ class MovieWatcher:
 
 
 def create_watcher(namer_watchdog_config: NamerConfig) -> MovieWatcher:
-    """
-    Configure and start a watchdog looking for new Movies.
-    """
     logger.info(namer_watchdog_config)
-
     if not verify_configuration(namer_watchdog_config, PartialFormatter()):
         sys.exit(-1)
-
     user = get_user_info(namer_watchdog_config)
     if not user:
         sys.exit(-1)
-
     logger.info('Logged as {name} ({id})'.format(**user))
-
     if namer_watchdog_config.retry_time:
         schedule.every().day.at(namer_watchdog_config.retry_time).do(lambda: retry_failed(namer_watchdog_config))
-
     movie_watcher = MovieWatcher(namer_watchdog_config)
-
     return movie_watcher
 
 
 def main(config: NamerConfig):
     level = 'DEBUG' if config.debug else 'INFO'
+    # Add the heartbeat sink to the logger.
+    logger.add(update_last_activity_time, level="INFO")
     logger.add(sys.stdout, format=config.console_format, level=level, diagnose=config.diagnose_errors)
-
     create_watcher(config).run()

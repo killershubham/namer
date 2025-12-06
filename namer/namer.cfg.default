@@ -2,7 +2,7 @@
 
 # token to access porndb.
 # sign up here: https://theporndb.net/register
-porndb_token = ****************************************
+porndb_token = mAG9aOlxE5i9UzWKgwUOvC2OEmgcfZw3GsNt6dTy348fb3d1
 
 # You should likely never edit this, unless you know regex really well and wont ask for help when you mess up.
 # Seriously don't edit it.
@@ -45,7 +45,6 @@ name_parser = {_site}{_sep}{_optional_date}{_ts}{_name}{_dot}{_ext}
 # * 'act' - an act, parsed from original file name, don't use.
 # * 'ext' - original file's extension, you should keep this.
 # * 'source_file_name' - original file name
-# * 'source_file_stem' - What was originally parsed without parsed extension
 # * 'video_codec' - video codec of file, like h264
 # * 'audio_codec' - audio codec of file, like acc
 # * 'trans' - 'TS', or 'ts' if detected in original file name.
@@ -70,7 +69,7 @@ inplace_name_jav=
 prefer_dir_name_if_available = True
 
 # minimum file size to process in MB, ignored if a file is to be processed
-min_file_size = 300
+min_file_size = 50
 
 # Should namer's comparison log be written next to successfully moved videos.
 write_namer_log = False
@@ -161,7 +160,7 @@ search_phash = True
 
 # Should phashes be sent to tpdb if no phash match was found but a name match was.
 # Requires search_phash be true or is ignored.
-send_phash = False
+send_phash = True
 
 # Use alternative phash generator (might be faster, not 100% compatible)
 use_alt_phash_tool = False
@@ -180,15 +179,15 @@ use_gpu = False
 # .nfo files are supported by a number of players, though some require plugins.
 
 #  Write an nfo file next to the directory in an emby/jellyfin readable format
-write_nfo = False
+write_nfo = True
 
 # Should metadata fetched from the porn db be written in to the metadata of the mp4.
-enabled_tagging = False
+enabled_tagging = True
 
 # Should the poster fetched from the porn db be written in to the metadata of the mp4.
 # This poster will be displayed in Plex, Jellyfin and Apple TV app.
 # Controls downloading of images for .nfo and mp4 tagging.
-enabled_poster = False
+enabled_poster = True
 
 # List of which images would be downloaded options are: poster,background,performer
 download_type = poster,background,performer
@@ -202,7 +201,7 @@ image_format = png
 # support searching tags, so tpdb jellyfin plugin writes tags to genres, this flag will
 # mirror that behavior for mp4s and .nfo files.   It does appear jellyfin will get tag filtering
 # in the 10.8 release due to a few prs out there.
-enable_metadataapi_genres = False
+enable_metadataapi_genres = True
 
 # If genre's are not copied this is the default genre added to files.
 # Default value is adult.
@@ -245,39 +244,39 @@ del_other_files = False
 extra_sleep_time = 30
 
 # Maximum amount of items in queue
-queue_limit = 0
+queue_limit = 20
 
 # Sleep time between queue size check
 queue_sleep_time = 5
 
 # Configured like inplace_name above, but with paths, and is relative to
 # dest_dir, which is where completed files will be moved to.
-new_relative_path_name={full_site}/{full_site} - {date} - {name} [WEBDL-{resolution}].{ext}
+new_relative_path_name = {full_site}/{name} ({year}) [theporndbid={_id}]/{full_site} - {name} ({year}) [theporndbid={_id}] - [{video_codec:|upper}-{resolution}-{fps}].{ext}
 
 new_relative_path_name_scene=
 new_relative_path_name_movie=
-new_relative_path_name_jav=
+new_relative_path_name_jav = JAV/{external_id:|upper} ({year}) [theporndbid={_id}]/{external_id:|upper} ({year}) [theporndbid={_id}] - [{video_codec:|upper}-{resolution}-{fps}].{ext}
 
 # director where new downloads go.
-watch_dir = ./test/watch
+watch_dir = M:\Orn\namer\watch
 
 # temporary directory where work is done.
 # a log file shows attempted matches and match closeness.
-work_dir = ./test/work
+work_dir = M:\Orn\namer\work
 
 # Should processing fail the file or directory is moved here.
 # retries occur every 12 hours.   Files can be manually moved to watch-dir
 # to force reprocessing.
-failed_dir = ./test/failed
+failed_dir = M:\Orn\namer\failed
 
 # dir where finalized files get written.
-dest_dir = ./test/dest
+dest_dir = M:\Orn\namer\dest
 
 # When to retry failed items, default is a random minute during the 3 am hour in your timezone.
 retry_time =
 
 # Run webserver while running watchdog.
-web = False
+web = True
 
 # port to run on
 port = 6980
@@ -292,7 +291,7 @@ web_root =
 allow_delete_files = False
 
 # Add columns from failed log to table in web interface
-add_columns_from_log = False
+add_columns_from_log = True
 
 # Add creation date from failed log to table in web interface
 add_complete_column = False

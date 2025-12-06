@@ -6,11 +6,13 @@ import argparse
 import gzip
 from dataclasses import dataclass
 import os
+import re 
 import shutil
 import sys
 from pathlib import Path
 from platform import system
 from typing import Iterable, List, Optional, Sequence, Tuple
+import filecmp
 
 import jsonpickle
 from loguru import logger
@@ -205,36 +207,53 @@ def move_to_final_location(command: Command, new_metadata: LookedUpFileInfo) -> 
     Moves a file or directory to its final location after verifying there is no collision.
     Should a collision occur, the file is appropriately renamed to avoid collision.
     """
-
     # determine where we will move the movie, and how we will name it.
-    # if in_place is False we will move it to the config defined destination dir.
-    # if a directory name was passed in we will rename the dir with the relative_path_name from the config
-    # else we will just rename the movie in its current location (as all that was defined in the command was the movie file.)
     name_template = get_inplace_name_template_by_type(command.config, new_metadata.type)
-
     target_dir = command.target_movie_file.parent
     if command.target_directory:
         name_template = get_new_relative_path_name_template_by_type(command.config, new_metadata.type)
         target_dir = command.target_directory.parent
-
     if not command.inplace:
         name_template = get_new_relative_path_name_template_by_type(command.config, new_metadata.type)
         target_dir = command.config.dest_dir
 
-    infix = 0
     # Find non-conflicting movie name.
     movies: List[str] = []
-    while True:
-        relative_path = Path(new_metadata.new_file_name(name_template, command.config, f'({infix})'))
-        movie_name = target_dir / relative_path
-        movie_name = movie_name.resolve()
-        infix += 1
-        if not movie_name.exists():
-            break
-
-        movies.append(str(movie_name))
-        if command.target_movie_file.samefile(movie_name):
-            break
+    
+    # First, generate the ideal, non-versioned name.
+    relative_path = Path(new_metadata.new_file_name(name_template, command.config, '(0)'))
+    movie_name = (target_dir / relative_path).resolve()
+    
+    # --- NEW JELLYFIN-FRIENDLY DUPLICATE HANDLING ---
+    if movie_name.exists():
+        # Check if the existing file is the same as the one we are moving (e.g., a re-process).
+        if command.target_movie_file.is_file() and movie_name.is_file() and filecmp.cmp(command.target_movie_file, movie_name, shallow=True):
+            logger.info('File is the same as destination, not moving.')
+        else:
+            logger.warning('{} exists, finding new versioned name.', movie_name)
+            movies.append(str(movie_name))
+            
+            version = 2
+            while movie_name.exists():
+                # Use a regex to find the quality tag (e.g., " - [H264-1080p]")
+                original_stem = Path(new_metadata.new_file_name(name_template, command.config, '(0)')).stem
+                quality_tag_match = re.search(r'(\s*-\s*\[.*\])$', original_stem)
+                
+                if quality_tag_match:
+                    # If a quality tag is found, insert the version before it.
+                    base_stem = original_stem[:quality_tag_match.start()]
+                    quality_tag = quality_tag_match.group(1)
+                    new_stem = f'{base_stem} - v{version}{quality_tag}'
+                else:
+                    # If no quality tag, just append the version.
+                    new_stem = f'{original_stem} - v{version}'
+                
+                # Reconstruct the full path with the new versioned stem.
+                relative_path = relative_path.with_name(new_stem + relative_path.suffix)
+                movie_name = (target_dir / relative_path).resolve()
+                version += 1
+            
+            logger.warning('New name selected: {}', movie_name)
 
     # Create the new dir if needed and move the movie file to it.
     movie_name.parent.mkdir(exist_ok=True, parents=True)
@@ -242,28 +261,26 @@ def move_to_final_location(command: Command, new_metadata: LookedUpFileInfo) -> 
     movies.append(str(movie_name))
 
     # Now that all files are in place we'll see if we intend to minimize duplicates
-    if not command.config.preserve_duplicates and movies:
-        # Now set to the final name location since -- will grab the metadata requested
-        # incase it has been updated.
-        relative_path = Path(new_metadata.new_file_name(name_template, command.config, '(0)'))
-
+    if not command.config.preserve_duplicates and len(movies) > 1:
         # no move best match to primary movie location.
-        final_location = (target_dir / relative_path).resolve()
-        selected_movie = selected_best_movie(movies, command.config)
+        final_location = (target_dir / Path(new_metadata.new_file_name(name_template, command.config, '(0)'))).resolve()
+        selected_movie = selected_best_movie([Path(m) for m in movies], command.config)
         if selected_movie:
             movies.remove(str(selected_movie))
             if str(selected_movie.resolve()) != str(final_location.resolve()):
-                movies.remove(str(final_location))
-                final_location.unlink()
+                if final_location.is_file():
+                    final_location.unlink()
                 shutil.move(selected_movie, final_location)
                 movie_name = final_location
-
-            for movie in movies:
-                Path(movie).unlink()
+            
+            for movie_path_str in movies:
+                movie_to_delete = Path(movie_path_str)
+                if movie_to_delete.is_file():
+                    movie_to_delete.unlink()
 
     containing_dir: Optional[Path] = None
     if relative_path.parts:
-        containing_dir = target_dir / relative_path.parent
+        containing_dir = movie_name.parent # Use final movie_name parent
 
     # we want to retain files if asked and if a directory will exist.
     if command.target_directory and not command.config.del_other_files and containing_dir:
@@ -276,7 +293,7 @@ def move_to_final_location(command: Command, new_metadata: LookedUpFileInfo) -> 
 
         # move directory contents
         for file in command.target_directory.iterdir():
-            if file != command.target_movie_file:
+            if not file.samefile(command.target_movie_file):
                 dest_file = containing_dir / file.name
                 dest_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(file, dest_file)
@@ -293,7 +310,8 @@ def move_to_final_location(command: Command, new_metadata: LookedUpFileInfo) -> 
 
     if containing_dir:
         output.target_directory = containing_dir
-        output.input_file = containing_dir
+        if not output.input_file:
+            output.input_file = containing_dir
 
     if command.target_directory and not is_relative_to(output.target_directory, command.target_directory):
         shutil.rmtree(command.target_directory)

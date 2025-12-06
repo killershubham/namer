@@ -7,6 +7,7 @@ import argparse
 import itertools
 import re
 import sys
+import time
 from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
@@ -33,30 +34,24 @@ from namer.videophash import imagehash, PerceptualHash
 
 def __find_best_match(query: Optional[str], match_terms: List[str], config: NamerConfig) -> Tuple[str, float]:
     powerset_iter = []
-
     max_size = len(match_terms)
     if config.max_performer_names > 0:
         max_size = min(max_size, config.max_performer_names)
-
     for length in range(1, max_size + 1):
         data = map(' '.join, itertools.combinations(match_terms, length))
         powerset_iter = itertools.chain(powerset_iter, data)
-
     ratio = rapidfuzz.process.extractOne(query, choices=powerset_iter, processor=utils.default_process)
     return (ratio[0], ratio[1]) if ratio else ratio
 
 
 def __attempt_better_match(existing: Tuple[str, float], query: Optional[str], match_terms: List[str], namer_config: NamerConfig) -> Tuple[str, float]:
-    if existing and existing[1] >= 94.9:  # magic numer
+    if existing and existing[1] >= 94.9:
         return existing
-
     found = __find_best_match(query, match_terms, namer_config)
     if not existing:
         return found
-
     if not found:
         return '', 0.0
-
     return existing if existing[1] >= found[1] else found
 
 
@@ -64,78 +59,69 @@ def __evaluate_match(name_parts: Optional[FileInfo], looked_up: LookedUpFileInfo
     site = False
     found_site = None
     release_date = False
+    jav_code_match = False
     result: Tuple[str, float] = ('', 0.0)
-
     if name_parts:
+        if name_parts.jav_code and looked_up.external_id:
+            parsed_code = re.sub(r'[^A-Z0-9]', '', name_parts.jav_code.upper())
+            api_code = re.sub(r'[^A-Z0-9]', '', looked_up.external_id.upper())
+            if parsed_code and api_code and parsed_code == api_code:
+                jav_code_match = True
+                logger.info(f"Perfect External ID Match Found: File code '{parsed_code}' == DB code '{api_code}'")
         if looked_up.site:
             found_site = re.sub(r'[^a-z0-9]', '', looked_up.site.lower())
             if not name_parts.site:
                 site = True
             else:
                 site = re.sub(r'[^a-z0-9]', '', name_parts.site.lower()) in found_site or re.sub(r'[^a-z0-9]', '', unidecode(name_parts.site.lower())) in found_site
-
         if found_site in namer_config.sites_with_no_date_info:
             release_date = True
         else:
             release_date = bool(name_parts.date and (name_parts.date == looked_up.date or unidecode(name_parts.date) == looked_up.date))
-
-        # Full Name
-        # Deal with some movies having 50+ performers by throwing performer info away for assemble casts :D
         performers = looked_up.performers
         if len(looked_up.performers) > 6:
             performers = []
-
         all_performers = list(map(lambda p: p.name, performers))
         if looked_up.name:
             all_performers.insert(0, looked_up.name)
-
         result = __attempt_better_match(result, name_parts.name, all_performers, namer_config)
         if name_parts.name:
             result = __attempt_better_match(result, unidecode(name_parts.name), all_performers, namer_config)
-
-        # First Name Powerset.
         if result and result[1] < 89.9:
             all_performers = list(map(lambda p: p.name.split(' ')[0], performers))
             if looked_up.name:
                 all_performers.insert(0, looked_up.name)
-
             result = __attempt_better_match(result, name_parts.name, all_performers, namer_config)
             if name_parts.name:
                 result = __attempt_better_match(result, unidecode(name_parts.name), all_performers, namer_config)
-
     phash_distance, phash_duration = None, None
     if phash:
         hashes_distances: List[Tuple[int, bool]] = []
-
         if not looked_up.hashes:
             phash_distance = 8 if looked_up.found_via_phash() else None
         else:
             phash_len = len(str(phash.phash))
             for item in looked_up.hashes:
                 if item.type == HashType.PHASH:
-                    if len(item.hash) != phash_len:
-                        continue
-
+                    if len(item.hash) != phash_len: continue
                     scene_hash = None
-                    with suppress(ValueError):
-                        scene_hash = imagehash.hex_to_hash(item.hash)
-
+                    with suppress(ValueError): scene_hash = imagehash.hex_to_hash(item.hash)
                     if scene_hash:
                         distance = phash.phash - imagehash.hex_to_hash(item.hash)
-                        duration = item.duration == phash.duration if item.duration else True
-                        hashes_distances.append((distance, duration))
-
+                        current_phash_duration_bool = True
+                        if item.duration is not None and phash.duration is not None and item.duration > 0:
+                            acceptable_relative_difference = 0.30
+                            relative_diff_ok = (abs(item.duration - phash.duration) / item.duration) <= acceptable_relative_difference
+                            current_phash_duration_bool = relative_diff_ok
+                        elif item.duration is not None and phash.duration is not None and item.duration == 0:
+                            current_phash_duration_bool = phash.duration == 0
+                        elif item.duration is not None and phash.duration is None:
+                            current_phash_duration_bool = False
+                        hashes_distances.append((distance, current_phash_duration_bool))
             phash_distance, phash_duration = min(hashes_distances) if hashes_distances else (None, None)
-
     return ComparisonResult(
-        name=result[0],
-        name_match=result[1],
-        date_match=release_date,
-        site_match=site,
-        name_parts=name_parts,
-        looked_up=looked_up,
-        phash_distance=phash_distance,
-        phash_duration=phash_duration,
+        name=result[0], name_match=result[1], date_match=release_date, site_match=site, name_parts=name_parts,
+        looked_up=looked_up, phash_distance=phash_distance, phash_duration=phash_duration, jav_code_match=jav_code_match,
     )
 
 
@@ -145,110 +131,90 @@ def __update_results(results: List[ComparisonResult], name_parts: Optional[FileI
             if match_attempt.uuid not in [res.looked_up.uuid for res in results]:
                 result: ComparisonResult = __evaluate_match(name_parts, match_attempt, namer_config, phash)
                 results.append(result)
-
         for match_attempt in __get_metadataapi_net_fileinfo(name_parts, namer_config, skip_date, skip_name, scene_type=scene_type):
             if match_attempt.uuid not in [res.looked_up.uuid for res in results]:
                 result: ComparisonResult = __evaluate_match(name_parts, match_attempt, namer_config, phash)
                 results.append(result)
-
         results = sorted(results, key=__match_weight, reverse=True)
-
     return results
 
 
 def __metadata_api_lookup_type(results: List[ComparisonResult], name_parts: Optional[FileInfo], namer_config: NamerConfig, scene_type: SceneType, phash: Optional[PerceptualHash] = None) -> List[ComparisonResult]:
     results = __update_results(results, name_parts, namer_config, scene_type=scene_type, phash=phash)
     results = __update_results(results, name_parts, namer_config, skip_name=True, scene_type=scene_type, phash=phash)
-
     if phash:
         results = __update_results(results, name_parts, namer_config, scene_type=scene_type)
         results = __update_results(results, name_parts, namer_config, skip_name=True, scene_type=scene_type)
-
     if name_parts and name_parts.date:
         results = __update_results(results, name_parts, namer_config, skip_date=True, scene_type=scene_type)
         results = __update_results(results, name_parts, namer_config, skip_date=True, skip_name=True, scene_type=scene_type)
-
     return results
 
 
 def __metadata_api_lookup(name_parts: FileInfo, namer_config: NamerConfig, phash: Optional[PerceptualHash] = None) -> List[ComparisonResult]:
-    scene_type: SceneType = SceneType.SCENE
-    if name_parts.site:  # noqa: SIM102
-        if name_parts.site.strip().lower() in namer_config.movie_data_preferred:
-            scene_type = SceneType.MOVIE
-
     results: List[ComparisonResult] = []
-    results: List[ComparisonResult] = __metadata_api_lookup_type(results, name_parts, namer_config, scene_type, phash)
-    if not results or not results[0].is_match():
-        scene_type = SceneType.MOVIE if scene_type == SceneType.SCENE else SceneType.SCENE
-        results: List[ComparisonResult] = __metadata_api_lookup_type(results, name_parts, namer_config, scene_type, phash)
-
+    if name_parts.code_type == 'JAV':
+        logger.info("JAV-style code '{}' detected. Searching JAV endpoint only.", name_parts.jav_code)
+        results = __metadata_api_lookup_type(results, name_parts, namer_config, SceneType.JAV, phash)
+    elif name_parts.code_type == 'SCENE_MOVIE_ID':
+        logger.info("Scene/Movie ID code '{}' detected. Searching Scenes endpoint first.", name_parts.jav_code)
+        results = __metadata_api_lookup_type(results, name_parts, namer_config, SceneType.SCENE, phash)
+        if not results or not results[0].is_match():
+            logger.info("No match found in Scenes for ID '{}'. Falling back to Movies endpoint.", name_parts.jav_code)
+            results = __metadata_api_lookup_type(results, name_parts, namer_config, SceneType.MOVIE, phash)
+    else:
+        logger.info("No External ID code found. Falling back to standard fuzzy search.")
+        scene_type: SceneType = SceneType.SCENE
+        if name_parts.site and name_parts.site.strip().lower() in namer_config.movie_data_preferred:
+            scene_type = SceneType.MOVIE
+        results = __metadata_api_lookup_type(results, name_parts, namer_config, scene_type, phash)
+        if not results or not results[0].is_match():
+            scene_type_fallback = SceneType.MOVIE if scene_type == SceneType.SCENE else SceneType.SCENE
+            results = __metadata_api_lookup_type(results, name_parts, namer_config, scene_type_fallback, phash)
     return results
 
 
 def __match_weight(result: ComparisonResult) -> float:
-    value = 0.00
+    if result.jav_code_match:
+        logger.debug("External ID match for '{} - {} - {}'", result.looked_up.site, result.looked_up.date, result.looked_up.name)
+        return 2000.0
+    value = 0.0
     if result.phash_distance is not None:
         logger.debug("Phash match with '{} - {} - {}'", result.looked_up.site, result.looked_up.date, result.looked_up.name)
         value += min(1000 - result.phash_distance * 125, 0)
-        if result.site_match:
-            value += 100
-        if result.date_match:
-            value += 100
-        if result.name_match:
-            value += result.name_match
-
+        if result.site_match: value += 100
+        if result.date_match: value += 100
+        if result.name_match: value += result.name_match
     if result.site_match and result.date_match and result.name_match and result.name_match >= 94.9:
         logger.debug("Name match of {:.2f} with '{} - {} - {}' for name: {}", value, result.looked_up.site, result.looked_up.date, result.looked_up.name, result.name)
         value += 1000.00
         value = (result.name_match + value) if result.name_match else value
-
     logger.debug('Match was {:.2f} for {}', value, result.name)
-
     return value
 
 
 @logger.catch
 def __request_response_json_object(url: str, config: NamerConfig, method: RequestType = RequestType.GET, data: Optional[Any] = None) -> str:
-    """
-    returns json object with info
-    """
-    headers = {
-        'Authorization': f'Bearer {config.porndb_token}',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': 'namer-1',
-    }
+    headers = {'Authorization': f'Bearer {config.porndb_token}', 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'namer-1'}
     data = orjson.dumps(data) if data else None
     http = Http.request(method, url, cache_session=config.cache_session, headers=headers, data=data)
     response = ''
     if http.ok:
         response = http.text
     else:
-        with suppress(JSONDecodeError):
-            data = orjson.loads(http.content)
-
+        with suppress(JSONDecodeError): data = orjson.loads(http.content)
         message = 'Unknown error'
-        if data and 'message' in data:
-            message = data['message']
-
+        if data and 'message' in data: message = data['message']
         logger.error(f'Server API error: "{message}"')
-
     return response
 
 
 @logger.catch
 def download_file(url: str, file: Path, config: NamerConfig) -> bool:
-    headers = {
-        'User-Agent': 'namer-1',
-    }
-    if 'theporndb.net' in url:
-        headers['Authorization'] = f'Bearer {config.porndb_token}'
-
+    headers = {'User-Agent': 'namer-1'}
+    if 'theporndb.net' in url: headers['Authorization'] = f'Bearer {config.porndb_token}'
     http_file = Http.download_file(url, headers=headers)
-    if http_file:
-        file.write_bytes(http_file.getbuffer().tobytes())
-
+    if http_file: file.write_bytes(http_file.getbuffer().tobytes())
     return bool(http_file)
 
 
@@ -259,36 +225,25 @@ def get_image(url: str, infix: str, video_file: Optional[Path], config: NamerCon
         if url.startswith('http') and not file.exists():
             file.parent.mkdir(parents=True, exist_ok=True)
             if download_file(url, file, config):
-                with Image.open(file) as img:
-                    if config.image_format == 'jpeg' and img.mode in ('RGBA', 'P'):
-                        img = img.convert('RGB')
-
-                    img.save(file, config.image_format)
+                with Image.open(file) as img: img.save(file, config.image_format)
                 set_permissions(file, config)
                 return file
             else:
                 return None
-
         poster = (video_file.parent / url).resolve()
         return poster if poster.exists() and poster.is_file() else None
-
     return None
 
 
 @logger.catch
 def get_trailer(url: Optional[str], video_file: Optional[Path], namer_config: NamerConfig) -> Optional[Path]:
-    """
-    returns json object with info
-    """
     if namer_config.trailer_location and url and video_file:
         logger.info('Attempting to download trailer')
         location = namer_config.trailer_location[: max([idx for idx, x in enumerate(namer_config.trailer_location) if x == '.'])]
         url_parts = url.split('?')[0].split('.')
-
         ext = 'mp4'
         if url_parts and url_parts[-1].lower() in namer_config.target_extensions:
             ext = url_parts[-1]
-
         trailer_file: Path = video_file.parent / (location + '.' + ext)
         trailer_file.parent.mkdir(parents=True, exist_ok=True)
         if not trailer_file.exists() and url.startswith('http'):
@@ -297,118 +252,73 @@ def get_trailer(url: Optional[str], video_file: Optional[Path], namer_config: Na
                 return trailer_file
             else:
                 return None
-
         trailer = (video_file.parent / url).resolve()
         return trailer if trailer.exists() and trailer.is_file() else None
-
     return None
 
 
 def __json_to_fileinfo(data: dict, url: str, json_response: str, name_parts: Optional[FileInfo], config: NamerConfig) -> LookedUpFileInfo:
     file_info = LookedUpFileInfo()
-
     data_id = data['_id']
+    file_info._id = data_id  # <--- ADD THIS LINE
     file_info.type = SceneType[data['type'].upper()]
-
     url_part = data['type'].lower()
     if file_info.type == SceneType.JAV:
         file_info.uuid = f'{url_part}/{data_id}'
     else:
         file_info.uuid = f'{url_part}s/{data_id}'
-
     file_info.guid = data['id']
     file_info.name = data['title']
     file_info.description = data['description']
     file_info.date = data['date']
     file_info.source_url = data['url']
-
-    if 'external_id' in data:
-        file_info.external_id = data['external_id']
-
-    if 'poster' in data:
-        file_info.poster_url = data['poster']
-
-    if 'background' in data and data['background']:
-        file_info.background_url = data['background']['large']
-
-    if 'trailer' in data:
-        file_info.trailer_url = data['trailer']
-
+    if 'external_id' in data: file_info.external_id = data['external_id']
+    if 'poster' in data: file_info.poster_url = data['poster']
+    if 'background' in data and data['background']: file_info.background_url = data['background']['large']
+    if 'trailer' in data: file_info.trailer_url = data['trailer']
     file_info.site = data['site']['name']
-
-    # clean up messy site metadata from adultdvdempire -> tpdb.
-    if file_info.type == SceneType.MOVIE:
-        file_info.site = re.sub(r'\(.*\)$', '', file_info.site.strip()).strip()
-
-    # This is for backwards compatibility of sha hashes only.
-    # remove before updating metadata with phash/oshash, replace with full tpdb url, or fully remove, or get a real uuid.
-    # this gets written in to the metadata of a video and effects file hashes.
+    if file_info.type == SceneType.MOVIE: file_info.site = re.sub(r'\(.*\)$', '', file_info.site.strip()).strip()
     file_info.look_up_site_id = data_id
-
     for json_performer in data['performers']:
-        if not json_performer['name']:
-            continue
-
+        if not json_performer['name']: continue
         performer_name = json_performer['name']
         if 'parent' in json_performer and json_performer['parent'] and 'name' in json_performer['parent']:
             performer_name = json_performer['parent']['name']
-
         performer = Performer(performer_name)
         performer.alias = json_performer['name']
         if 'parent' in json_performer and json_performer['parent'] and 'extras' in json_performer['parent']:
             performer.role = json_performer['parent']['extras']['gender']
         elif 'extra' in json_performer:
             performer.role = json_performer['extra']['gender']
-
         if 'parent' in json_performer and json_performer['parent'] and 'image' in json_performer['parent']:
             performer.image = json_performer['parent']['image']
         elif 'image' in json_performer:
             performer.image = json_performer['image']
-
         file_info.performers.append(performer)
-
     file_info.original_query = url
     file_info.original_response = json_response
     file_info.original_parsed_filename = name_parts
-
-    if 'duration' in data:
-        file_info.duration = data['duration']
-
+    if 'duration' in data: file_info.duration = data['duration']
     tags = []
     if 'tags' in data:
         for tag in data['tags']:
-            if tag['name'] not in tags:
-                tags.append(tag['name'])
-
+            if tag['name'] not in tags: tags.append(tag['name'])
     file_info.tags = tags
-
     hashes = []
     if 'hashes' in data:
         for item in data['hashes']:
             scene_hash = SceneHash(item['hash'], item['type'], item['duration'])
             hashes.append(scene_hash)
-
     file_info.hashes = hashes
-
-    if 'is_collected' in data:
-        file_info.is_collected = data['is_collected']
-
+    if 'is_collected' in data: file_info.is_collected = data['is_collected']
     if data['site']['parent_id'] and data['site']['parent_id'] != data['site']['id']:
-        if 'parent' in data['site']:
-            parent_name = data['site']['parent']['name']
-        else:
-            parent_name = get_site_name(data['site']['parent_id'], config)
-
+        if 'parent' in data['site']: parent_name = data['site']['parent']['name']
+        else: parent_name = get_site_name(data['site']['parent_id'], config)
         file_info.parent = parent_name
-
     if data['site']['network_id'] and data['site']['network_id'] != data['site']['id']:
-        if 'network' in data['site']:
-            network_name = data['site']['network']['name']
-        else:
-            network_name = get_site_name(data['site']['network_id'], config)
-
+        if 'network' in data['site']: network_name = data['site']['network']['name']
+        else: network_name = get_site_name(data['site']['network_id'], config)
         file_info.network = network_name
-
     return file_info
 
 
@@ -422,50 +332,32 @@ def __metadataapi_response_to_data(json_object: dict, url: str, json_response: s
         else:
             found_file_info: LookedUpFileInfo = __json_to_fileinfo(json_object['data'], url, json_response, name_parts, config)
             file_infos.append(found_file_info)
-
     return file_infos
 
 
-def __build_url(namer_config: NamerConfig, site: Optional[str] = None, release_date: Optional[str] = None, name: Optional[str] = None, uuid: Optional[str] = None, page: Optional[int] = None, scene_type: Optional[SceneType] = None, phash: Optional[PerceptualHash] = None, add_to_collection: Optional[bool] = None, user: Optional[bool] = None) -> Optional[str]:
+def __build_url(namer_config: NamerConfig, site: Optional[str] = None, release_date: Optional[str] = None, name: Optional[str] = None, uuid: Optional[str] = None, page: Optional[int] = None, scene_type: Optional[SceneType] = None, phash: Optional[PerceptualHash] = None, add_to_collection: Optional[bool] = None, user: Optional[bool] = None, name_parts: Optional[FileInfo] = None) -> Optional[str]:
     query = ''
     if uuid:
         query = uuid
-
-        if add_to_collection:
-            query += '?add_to_collection=1'
+        if add_to_collection: query += '?add_to_collection=1'
     elif user:
         query += 'auth/user'
     else:
-        if scene_type == SceneType.SCENE:
-            query = 'scenes'
-        elif scene_type == SceneType.MOVIE:
-            query = 'movies'
-        elif scene_type == SceneType.JAV:
-            query = 'jav'
-
-        if phash:
-            query += f'?hash={phash.phash}&hashType={HashType.PHASH.value}'
+        endpoint = scene_type.value.lower()
+        if scene_type == SceneType.SCENE or scene_type == SceneType.MOVIE:
+            endpoint += 's'
+        if name_parts and name_parts.jav_code:
+            logger.info("Constructing a direct search query using external_id: {}", name_parts.jav_code)
+            query = f'{endpoint}?external_id={quote(name_parts.jav_code)}'
+        elif phash:
+            query = f'{endpoint}?hash={phash.phash}&hashType={HashType.PHASH.value}'
         elif site or release_date or name:
-            query += '?parse='
-
-            if site:
-                # There is a known issue in tpdb, where site names are not matched due to casing.
-                # example Teens3Some fails, but Teens3some succeeds.  Turns out Teens3Some is treated as 'Teens 3 Some'
-                # and Teens3some is treated correctly as 'Teens 3some'.  Also, 'brazzersextra' still match 'Brazzers Extra'
-                # Hense, the hack of lower casing the site.
-                query += quote(re.sub(r'[^a-z0-9]', '', unidecode(site).lower())) + '.'
-
-            if release_date:
-                query += release_date + '.'
-
-            if name:
-                query += quote(name)
-
-            if page and page > 1:
-                query += f'&page={page}'
-
+            query = f'{endpoint}?parse='
+            if site: query += quote(re.sub(r'[^a-z0-9]', '', unidecode(site).lower())) + '.'
+            if release_date: query += release_date + '.'
+            if name: query += quote(name)
+            if page and page > 1: query += f'&page={page}'
             query += '&limit=25'
-
     return f'{namer_config.override_tpdb_address}/{query}' if query != '' else None
 
 
@@ -473,11 +365,9 @@ def __get_metadataapi_net_info(url: str, name_parts: Optional[FileInfo], namer_c
     json_response = __request_response_json_object(url, namer_config)
     file_infos = []
     if json_response and json_response.strip() != '':
-        # logger.debug("json_response: \n{}", json_response)
         json_obj = orjson.loads(json_response)
         formatted = orjson.dumps(json_obj, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS).decode('UTF-8')
         file_infos = __metadataapi_response_to_data(json_obj, url, formatted, name_parts, namer_config)
-
     return file_infos
 
 
@@ -486,26 +376,25 @@ def __get_metadataapi_net_fileinfo(name_parts: Optional[FileInfo], namer_config:
         release_date = name_parts.date if name_parts and not skip_date else None
         name = name_parts.name if name_parts and not skip_name else None
         site = name_parts.site if name_parts else None
-
-        url = __build_url(namer_config, site, release_date, name, scene_type=scene_type, phash=phash)
+        url = __build_url(namer_config, site, release_date, name, scene_type=scene_type, phash=phash, name_parts=name_parts)
         if url:
             file_infos = __get_metadataapi_net_info(url, name_parts, namer_config)
+            if not file_infos:
+                logger.warning("API returned no results, retrying in 2 seconds...")
+                time.sleep(2)
+                file_infos = __get_metadataapi_net_info(url, name_parts, namer_config)
             return file_infos
-
     return []
 
 
 @logger.catch
 def get_site_name(site_id: str, namer_config: NamerConfig) -> Optional[str]:
     site = None
-
     url = f'{namer_config.override_tpdb_address}/sites/{site_id}'
     json_response = __request_response_json_object(url, namer_config)
-
     if json_response and json_response.strip() != '':
         json_obj = orjson.loads(json_response)
         site = json_obj.data.name
-
     return site
 
 
@@ -515,33 +404,58 @@ def get_complete_metadataapi_net_fileinfo(name_parts: Optional[FileInfo], uuid: 
         file_infos = __get_metadataapi_net_info(url, name_parts, namer_config)
         if file_infos:
             return file_infos[0]
-
     return None
 
 
+# In metadataapi.py, REPLACE the entire match function:
 def match(file_name_parts: Optional[FileInfo], namer_config: NamerConfig, phash: Optional[PerceptualHash] = None) -> ComparisonResults:
     """
     Give parsed file name parts, and a porndb token, returns a sorted list of possible matches.
     Matches will appear first.
     """
+    # --- NEW: SUPER-PRIORITY DIRECT LOOKUP BY TPDB ID ---
+    if file_name_parts and file_name_parts.tpdb_id:
+        logger.info("TPDB ID {} found in filename. Performing direct lookup, skipping all searches.", file_name_parts.tpdb_id)
+        
+        # The ID could be for a Scene, Movie, or JAV, so we must try them all.
+        endpoints_to_try = [f"scenes/{file_name_parts.tpdb_id}", f"movies/{file_name_parts.tpdb_id}", f"jav/{file_name_parts.tpdb_id}"]
+        
+        looked_up_info: Optional[LookedUpFileInfo] = None
+        for endpoint in endpoints_to_try:
+            logger.debug("Attempting direct lookup via endpoint: {}", endpoint)
+            looked_up_info = get_complete_metadataapi_net_fileinfo(file_name_parts, endpoint, namer_config)
+            if looked_up_info:
+                logger.info("Direct lookup successful for ID {} using endpoint '/{}'", file_name_parts.tpdb_id, endpoint)
+                break # Success, stop trying other endpoints.
+        
+        if looked_up_info:
+            # We found it. Create a single, 100% confident result and return immediately.
+            perfect_match = ComparisonResult(
+                name=looked_up_info.name or '', name_match=100.0, site_match=True, date_match=True,
+                name_parts=file_name_parts, looked_up=looked_up_info, phash_distance=None,
+                phash_duration=None, jav_code_match=True # Re-using this flag to signify a perfect match.
+            )
+            return ComparisonResults([perfect_match], file_name_parts)
+        else:
+            logger.warning("Direct lookup for TPDB ID {} failed on all endpoints. Falling back to normal search.", file_name_parts.tpdb_id)
+
+    # --- ORIGINAL LOGIC (FALLBACK) ---
+    # If no tpdb_id was found, or if lookup failed, proceed with the normal search process.
     results: List[ComparisonResult] = []
     if not file_name_parts:
         results = __metadata_api_lookup_type(results, None, namer_config, SceneType.SCENE, phash)
     else:
         results: List[ComparisonResult] = __metadata_api_lookup(file_name_parts, namer_config, phash)
-
+    
     comparison_results = sorted(results, key=__match_weight, reverse=True)
 
-    # Works around the porndb not returning all info on search queries by looking up the full data
-    # with the uuid of the best match.
-    for comparison_result in comparison_results:
-        if comparison_result.is_match():
-            uuid = comparison_results[0].looked_up.uuid
-            if uuid:
-                file_infos: Optional[LookedUpFileInfo] = get_complete_metadataapi_net_fileinfo(file_name_parts, uuid, namer_config)
-                if file_infos:
-                    file_infos.original_query = comparison_results[0].looked_up.original_query
-                    comparison_results[0].looked_up = file_infos
+    if comparison_results and comparison_results[0].is_match() and not comparison_results[0].looked_up.tags:
+         uuid = comparison_results[0].looked_up.uuid
+         if uuid:
+            file_infos: Optional[LookedUpFileInfo] = get_complete_metadataapi_net_fileinfo(file_name_parts, uuid, namer_config)
+            if file_infos:
+                file_infos.original_query = comparison_results[0].looked_up.original_query
+                comparison_results[0].looked_up = file_infos
 
     return ComparisonResults(comparison_results, file_name_parts)
 
@@ -554,12 +468,7 @@ def toggle_collected(metadata: LookedUpFileInfo, config: NamerConfig):
 
 
 def share_hash(metadata: LookedUpFileInfo, scene_hash: SceneHash, config: NamerConfig):
-    data = {
-        'type': scene_hash.type.value,
-        'hash': scene_hash.hash,
-        'duration': scene_hash.duration,
-    }
-
+    data = {'type': scene_hash.type.value, 'hash': scene_hash.hash, 'duration': scene_hash.duration}
     logger.info(f'Sending {scene_hash.type.value}: {scene_hash.hash} with duration {scene_hash.duration}')
     __request_response_json_object(f'{config.override_tpdb_address}/{metadata.uuid}/hash', config=config, method=RequestType.POST, data=data)
 
@@ -568,57 +477,30 @@ def share_hash(metadata: LookedUpFileInfo, scene_hash: SceneHash, config: NamerC
 def get_user_info(config: NamerConfig):
     url = __build_url(config, user=True)
     response = __request_response_json_object(url, config)
-
     data = orjson.loads(response) if response else None
-
     return data['data'] if data else None
 
 
 def main(args_list: List[str]):
-    """
-    Looks up metadata from theporndb.net base on file name.
-    """
-    description = """
-    Command line interface to look up a suggested name for an adult movie file based on an input string
-    that is parsable by namer_file_parser.py
-    """
+    description = "Command line interface to look up a suggested name for an adult movie file"
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('-c', '--configfile', help='override location for a configuration file.', type=Path)
     parser.add_argument('-f', '--file', help='File we want to provide a match name for.', required=True, type=Path)
     parser.add_argument('-j', '--jsonfile', help='write returned json to this file.', type=Path)
     parser.add_argument('-v', '--verbose', help='verbose, print logs', action='store_true')
     args = parser.parse_args(args=args_list)
-
     config = default_config(args.configfile.resolve() if args.configfile else None)
-
     if args.verbose:
         level = 'DEBUG' if config.debug else 'INFO'
         logger.add(sys.stdout, format=config.console_format, level=level, diagnose=config.diagnose_errors)
-
     verify_configuration(config, PartialFormatter())
-
     file_name: Optional[Command] = make_command(args.file.resolve(), config, ignore_file_restrictions=True)
-
     results: Optional[ComparisonResults] = None
-    if file_name and file_name.parsed_file:
-        results = match(file_name.parsed_file, config)
-
+    if file_name and file_name.parsed_file: results = match(file_name.parsed_file, config)
     if results:
         matched = results.get_match()
         if matched:
-            if file_name.input_file.is_file():
-                ffprobe_results = config.ffmpeg.ffprobe(file_name.input_file)
-                if ffprobe_results:
-                    matched.looked_up.resolution = ffprobe_results.get_resolution()
-
-                    video = ffprobe_results.get_default_video_stream()
-                    matched.looked_up.video_codec = video.codec_name if video else None
-
-                    audio = ffprobe_results.get_default_audio_stream()
-                    matched.looked_up.audio_codec = audio.codec_name if audio else None
-
             name_template = get_inplace_name_template_by_type(config, matched.looked_up.type)
-
             print(matched.looked_up.new_file_name(name_template, config))
             if args.jsonfile and matched.looked_up and matched.looked_up.original_response:
                 Path(args.jsonfile).write_text(matched.looked_up.original_response, encoding='UTF-8')

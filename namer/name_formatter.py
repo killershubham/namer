@@ -11,32 +11,10 @@ class PartialFormatter(string.Formatter):
     """
 
     supported_keys = [
-        'date',
-        'description',
-        'name',
-        'site',
-        'full_site',
-        'parent',
-        'full_parent',
-        'network',
-        'full_network',
-        'performers',
-        'all_performers',
-        'performer-sites',
-        'all_performer-sites',
-        'act',
-        'ext',
-        'trans',
-        'source_file_name',
-        'source_file_stem',
-        'uuid',
-        'vr',
-        'type',
-        'year',
-        'resolution',
-        'video_codec',
-        'audio_codec',
-        'external_id',
+        'date', 'description', 'name', 'site', 'full_site', 'parent', 'full_parent', 'network',
+        'full_network', 'performers', 'all_performers', 'performer-sites', 'all_performer-sites',
+        'act', 'ext', 'trans', 'source_file_name', 'source_file_stem', 'uuid', '_id', 'vr', 'type', 'year',
+        'resolution', 'video_codec', 'audio_codec', 'external_id', 'fps',
     ]
 
     __regex = {
@@ -47,9 +25,13 @@ class PartialFormatter(string.Formatter):
 
     def __init__(self, missing='~~', bad_fmt='!!'):
         self.missing, self.bad_fmt = missing, bad_fmt
+        self.current_field = None
         FILTERS['split'] = str.split
 
     def get_field(self, field_name, args, kwargs):
+        # Store the current field name so format_field knows what it's working on.
+        self.current_field = field_name
+        
         # Handle a key not found
         try:
             val = super().get_field(field_name, args, kwargs)
@@ -63,6 +45,21 @@ class PartialFormatter(string.Formatter):
     def format_field(self, value, format_spec: str):
         if not value:
             return self.missing
+
+        # --- NEW AGGRESSIVE SANITIZATION AND TRUNCATION FOR 'name' FIELD ---
+        if isinstance(value, str) and self.current_field == 'name':
+            # 1. Aggressively sanitize to remove characters that cause issues on network shares.
+            # This whitelist allows: letters, numbers, spaces, hyphens, parentheses, brackets, underscores, periods, commas.
+            sanitized_name = re.sub(r'[^a-zA-Z0-9\s\-\(\)\[\]_.,]', '', value)
+            # Collapse multiple spaces or hyphens into a single space for cleanliness.
+            sanitized_name = re.sub(r'[\s.-]+', ' ', sanitized_name).strip()
+
+            # 2. Truncate the now-safe name to a reasonable length.
+            MAX_NAME_LENGTH = 180
+            if len(sanitized_name) > MAX_NAME_LENGTH:
+                sanitized_name = sanitized_name[:MAX_NAME_LENGTH].strip()
+            
+            value = sanitized_name  # Use the fully processed name for formatting.
 
         try:
             if self.__regex['s'].match(format_spec):

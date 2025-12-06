@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePath
 from typing import Dict, List, Optional, Union
-
+from loguru import logger
 from pathvalidate import Platform, sanitize_filename
 
 from namer.configuration import NamerConfig
@@ -179,6 +179,10 @@ class LookedUpFileInfo:
     """
     the codec of audio.
     """
+    fps: Optional[str] = None      # <--- ADD THIS LINE
+    """                          # <--- ADD THIS
+    The video's frames per second, e.g. "30fps".
+    """                          # <--- ADD THIS
     external_id: Optional[str] = None
     """
     Should the source site provide it, the id for the site.
@@ -187,6 +191,10 @@ class LookedUpFileInfo:
     """
     Indicates if the current user has marked this video as part of their collection.
     """
+    _id: Optional[int] = None      # <--- ADD THIS LINE
+    """                          # <--- ADD THIS
+    ThePornDB's internal integer ID for the scene/movie.
+    """                          # <--- ADD THIS
 
     def __init__(self):
         self.performers = []
@@ -236,16 +244,21 @@ class LookedUpFileInfo:
             'all_performer-sites': ', '.join(map(lambda p: p.name, filter(lambda p: p.alias, self.performers))) if self.performers else None,
             'ext': self.original_parsed_filename.extension if self.original_parsed_filename else None,
             'source_file_name': self.original_parsed_filename.source_file_name if self.original_parsed_filename else None,
-            'source_file_stem': self.original_parsed_filename.source_file_stem if self.original_parsed_filename else None,
             'trans': self.original_parsed_filename.trans if self.original_parsed_filename else None,
             'vr': vr,
             'resolution': res_str,
             'video_codec': self.video_codec,
             'audio_codec': self.audio_codec,
+            'fps': self.fps,
             'type': self.type.value,
             'external_id': self.external_id,
+            '_id': self._id,  # <--- ADD THIS LINE
         }
 
+    #
+#
+# REPLACE the entire new_file_name function in comparison_results.py
+#
     def new_file_name(self, template: str, config: NamerConfig, infix: str = '(0)') -> str:
         """
         Constructs a new file name based on a template (describe in NamerConfig)
@@ -346,19 +359,25 @@ class ComparisonResult:
     Duration diff with phash duration.
     """
 
+    jav_code_match: bool
+    """
+    True if the looked up external_id matches a JAV code parsed from the filename.
+    """
+
     def is_phash_match(self, target_distance: int = 0) -> bool:
         """
         Returns true if match is a phash match.
         """
         return self.phash_distance is not None and self.phash_distance <= target_distance and self.phash_duration is not None
 
-    def is_match(self, target: float = 94.9, target_distance: int = 0) -> bool:
+    def is_match(self, target: float = 94.9, target_distance: int = 2) -> bool:
         """
         Returns true if site and creation data match exactly, and if the name fuzzes against
         the metadate to 90% or more (via RapidFuzz, and various concatenations of metadata about
         actors and scene name) or is a phash match.
         """
-        return bool(self.site_match and self.date_match and self.name_match and self.name_match >= target) or self.is_phash_match(target_distance)
+                # A JAV code match is the highest confidence match possible.
+        return self.jav_code_match or bool(self.site_match and self.date_match and self.name_match and self.name_match >= target) or self.is_phash_match(target_distance)
 
     def is_super_match(self, target: float = 94.9, target_distance: int = 0) -> bool:
         """
@@ -366,7 +385,7 @@ class ComparisonResult:
         the metadate to 95% or more (via RapidFuzz, and various concatenations of metadata about
         actors and scene name) and is a phash match.
         """
-        return bool(self.site_match and self.date_match and self.name_match and self.name_match >= target) and self.is_phash_match(target_distance)
+        return self.jav_code_match or (bool(self.site_match and self.date_match and self.name_match and self.name_match >= target) and self.is_phash_match(target_distance))
 
     def as_dict(self) -> dict:
         return {
@@ -376,6 +395,7 @@ class ComparisonResult:
             'date_match': self.date_match,
             'phash_distance': self.phash_distance,
             'phash_duration': self.phash_duration,
+            'jav_code_match': self.jav_code_match,
         }
 
 
