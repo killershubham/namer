@@ -258,19 +258,19 @@ new_relative_path_name_movie=
 new_relative_path_name_jav = JAV/{external_id:|upper} ({year}) [theporndbid={_id}]/{external_id:|upper} ({year}) [theporndbid={_id}] - [{video_codec:|upper}-{resolution}-{fps}].{ext}
 
 # director where new downloads go.
-watch_dir = M:\Orn\namer\watch
+watch_dir = M:\namer\watch
 
 # temporary directory where work is done.
 # a log file shows attempted matches and match closeness.
-work_dir = M:\Orn\namer\work
+work_dir = M:\namer\work
 
 # Should processing fail the file or directory is moved here.
 # retries occur every 12 hours.   Files can be manually moved to watch-dir
 # to force reprocessing.
-failed_dir = M:\Orn\namer\failed
+failed_dir = M:\namer\failed
 
 # dir where finalized files get written.
-dest_dir = M:\Orn\namer\dest
+dest_dir = M:\namer\dest
 
 # When to retry failed items, default is a random minute during the 3 am hour in your timezone.
 retry_time =
