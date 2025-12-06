@@ -2,7 +2,7 @@
 
 # token to access porndb.
 # sign up here: https://theporndb.net/register
-porndb_token = mAG9aOlxE5i9UzWKgwUOvC2OEmgcfZw3GsNt6dTy348fb3d1
+porndb_token = ****************************************
 
 # You should likely never edit this, unless you know regex really well and wont ask for help when you mess up.
 # Seriously don't edit it.
