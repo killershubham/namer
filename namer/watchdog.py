@@ -14,10 +14,8 @@ from platform import system
 from queue import Queue
 from threading import Thread
 from typing import Optional
-from typing import Optional
-from datetime import datetime, timedelta  # <-- ADD THIS
-from dataclasses import dataclass, field    # <-- ADD THIS
-
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
 
 import schedule
 from loguru import logger
@@ -33,14 +31,7 @@ from namer.namer import process_file
 from namer.web.server import NamerWebServer
 
 
-def __is_file_in_use_windows(file: Path):
-    try:
-        file.rename(file)
-    except PermissionError:
-        return True
-    else:
-        return False
-# --- ADD THIS ENTIRE HEARTBEAT MECHANISM ---
+# --- HEARTBEAT MECHANISM ---
 @dataclass
 class ActivityHeartbeat:
     """A simple mutable object to hold the last activity timestamp."""
@@ -51,7 +42,17 @@ heartbeat = ActivityHeartbeat()
 def update_last_activity_time(message):
     """A Loguru sink function that updates the global heartbeat on every log message."""
     heartbeat.last_activity = datetime.now()
-# --- END OF NEW BLOCK ---
+# --- END OF HEARTBEAT MECHANISM ---
+
+
+def __is_file_in_use_windows(file: Path):
+    try:
+        file.rename(file)
+    except PermissionError:
+        return True
+    else:
+        return False
+
 
 def __is_file_in_use_unix(file: Path):
     try:
@@ -246,6 +247,8 @@ class MovieWatcher:
                 logger.info("Work directory is clean. No recovery needed.")
             
             self.start()
+            heartbeat.last_activity = datetime.now() # Reset heartbeat after startup.
+
             if self.__namer_config.web:
                 self.__webserver = NamerWebServer(self.__namer_config, self.__command_queue)
                 self.__webserver.start()
@@ -378,16 +381,25 @@ class MovieWatcher:
 
 
 def create_watcher(namer_watchdog_config: NamerConfig) -> MovieWatcher:
+    """
+    Configure and start a watchdog looking for new Movies.
+    """
     logger.info(namer_watchdog_config)
+
     if not verify_configuration(namer_watchdog_config, PartialFormatter()):
         sys.exit(-1)
+
     user = get_user_info(namer_watchdog_config)
     if not user:
         sys.exit(-1)
+
     logger.info('Logged as {name} ({id})'.format(**user))
+
     if namer_watchdog_config.retry_time:
         schedule.every().day.at(namer_watchdog_config.retry_time).do(lambda: retry_failed(namer_watchdog_config))
+
     movie_watcher = MovieWatcher(namer_watchdog_config)
+
     return movie_watcher
 
 
@@ -396,4 +408,5 @@ def main(config: NamerConfig):
     # Add the heartbeat sink to the logger.
     logger.add(update_last_activity_time, level="INFO")
     logger.add(sys.stdout, format=config.console_format, level=level, diagnose=config.diagnose_errors)
+
     create_watcher(config).run()
