@@ -1,3 +1,90 @@
+## 🔧 Modified Files in This Fork
+
+Here is the complete list of files we have modified from the original **namer** source code.  
+Each section explains **what changed** and **why**, providing a clear record of your custom build.
+
+---
+
+### 1. `namer/fileinfo.py`
+
+**Changes:**
+- Added logic to parse JAV codes (`ABC-123`) and generic codes (`DID-123`, `MILF-123`).
+- Added **Super-Priority** parsing for ThePornDB IDs (`[theporndbid=123]`) to enable self-healing of bad filenames.
+- Added logic to ignore image files (`-poster`, `-background`) to prevent processing of artifacts.
+- Switched to `pathlib` for reliable extension extraction (fixes the “missing extension” bug).
+
+---
+
+### 2. `namer/metadataapi.py`
+
+**Changes:**
+- **Search Logic:** Prioritizes searching by `external_id` if a code is found, skipping fuzzy name search.
+- **Direct Lookup:** If a TPDB ID is detected in the filename, bypasses search and fetches that exact ID.
+- **Image Handling:** `get_image` now auto-converts transparent images (RGBA/Palette) to RGB to avoid JPEG crashes.
+- **Data:** Populates the new `_id` field from the API response.
+
+---
+
+### 3. `namer/comparison_results.py`
+
+**Changes:**
+- Added new fields: `_id` (TPDB ID), `fps`, and `jav_code_match`.
+- Updated `is_match` logic to treat a JAV code match as a **100% perfect match**, overriding score thresholds.
+
+---
+
+### 4. `namer/name_formatter.py`
+
+**Changes:**
+- **Validation:** `get_field` now correctly handles template keys with filters  
+  (e.g., `{video_codec|upper}`).
+- **Sanitization:** Improved cleaning of `{name}` to prevent mangled filenames on Windows/SMB shares.
+- Added support for new keys: `fps`, `_id`, `external_id`.
+
+---
+
+### 5. `namer/namer.py`
+
+**Changes:**
+- Reordered operations so ffprobe runs *before* renaming — enabling `{resolution}`, `{video_codec}`, and `{fps}` in filenames.
+- Populates `new_metadata.fps`.
+
+---
+
+### 6. `namer/ffmpeg.py`
+
+**Changes:**
+- Added `get_fps()` to extract and format frame rate (e.g., `30fps`) from video stream data.
+
+---
+
+### 7. `namer/command.py`
+
+**Changes:**
+- **Duplicate Handling:** Uses Jellyfin-friendly versioning (`Movie - v2.mp4`) instead of generic counters (`Movie(1).mp4`).
+- Added `import filecmp` to fix comparison crash.
+- Added a safety check to handle `None` parse results.
+
+---
+
+### 8. `namer/watchdog.py`
+
+**Changes:**
+- **Queue Throttling:** Moves files from *watch* → *work* only when queue space is available (`queue_limit` respected).
+- **Auto-Recovery:** On startup, automatically moves stranded files from *work* back to *watch* instead of crashing.
+- **Self-Healing:** Added a “Heartbeat” monitor — if logs stop updating for 15 minutes while work is pending, it safely restarts the process via `subprocess`.
+
+---
+
+### 9. `namer/configuration_utils.py`
+
+**Changes:**
+- Commented out the strict check that blocked startup when `work_dir` was not empty (now handled safely by `watchdog.py`).
+
+
+
+
+
 .. |logo| image:: ./logo/namer.png
   :width: 80
   :class: display: inline flow; align: left
