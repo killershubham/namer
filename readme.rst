@@ -1,7 +1,7 @@
 ## 🔧 Modified Files in This Fork
 
 Here is the complete list of files we have modified from the original **namer** source code.  
-Each section explains **what changed** and **why**, providing a clear record of your custom build.
+Each section explains **what changed** and **why**, providing a clear record.
 
 ---
 
