@@ -363,6 +363,7 @@ class ComparisonResult:
     """
     True if the looked up external_id matches a JAV code parsed from the filename.
     """
+    duration_match: bool = False
 
     def is_phash_match(self, target_distance: int = 0) -> bool:
         """
@@ -396,6 +397,7 @@ class ComparisonResult:
             'phash_distance': self.phash_distance,
             'phash_duration': self.phash_duration,
             'jav_code_match': self.jav_code_match,
+            'duration_match': self.duration_match, 
         }
 
 
