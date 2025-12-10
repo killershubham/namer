@@ -46,10 +46,19 @@ class FileInfo:
 
 
 def name_cleaner(name: str, re_cleanup: List[Pattern]) -> str:
+    """
+    Given the name parts, following a date, but preceding the file extension, attempt to glean
+    extra information and discard useless information for matching with the porndb.
+    """
+    # --- NEW: Remove text inside square brackets [] ---
+    name = re.sub(r'\[.*?\]', '', name)
+    
     for regex in re_cleanup:
         name = regex.sub('', name)
+
     name = name.replace('.', ' ')
     name = ' '.join(name.split()).strip('-')
+
     return name
 
 
