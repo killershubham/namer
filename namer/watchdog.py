@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import time
+import subprocess
 from contextlib import suppress
 from pathlib import Path
 from platform import system
@@ -262,11 +263,29 @@ class MovieWatcher:
                     if inactivity_duration > timedelta(minutes=15) and not self.__command_queue.empty():
                         logger.critical(
                             "No activity detected for over 15 minutes while work is in the queue. "
-                            "The process appears to be frozen. Forcing a restart."
+                            "The process appears to be frozen. Forcing a restart via external script."
                         )
-                        # Safely restart the application.
-                        os.execl(sys.executable, sys.executable, *sys.argv)
-                    
+                        
+                        # --- CLEANER WINDOWS RESTART LOGIC ---
+                        # Create a temporary batch file to handle the restart externally.
+                        restart_script = Path(tempfile.gettempdir()) / "namer_restart.bat"
+                        python_exe = sys.executable
+                        # Reconstruct the command line arguments safely
+                        args = " ".join(['"{}"'.format(a) for a in sys.argv])
+                        
+                        with open(restart_script, "w") as f:
+                            f.write("@echo off\n")
+                            f.write("timeout /t 5 /nobreak >nul\n") # Wait for this process to die
+                            f.write(f'"{python_exe}" {args}\n')     # Start new process
+                            f.write("del \"%~f0\" & exit\n")        # Self-delete
+                        
+                        # Launch the batch file detached
+                        subprocess.Popen([str(restart_script)], shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                        
+                        # Kill current process immediately
+                        sys.exit(0)
+                        # -------------------------------------
+
                     schedule.run_pending()
                     time.sleep(3)
                 self.stop()
