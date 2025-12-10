@@ -60,7 +60,9 @@ def __evaluate_match(name_parts: Optional[FileInfo], looked_up: LookedUpFileInfo
     found_site = None
     release_date = False
     jav_code_match = False
+    duration_match = False  # <--- NEW VARIABLE
     result: Tuple[str, float] = ('', 0.0)
+
     if name_parts:
         if name_parts.jav_code and looked_up.external_id:
             parsed_code = re.sub(r'[^A-Z0-9]', '', name_parts.jav_code.upper())
@@ -94,6 +96,19 @@ def __evaluate_match(name_parts: Optional[FileInfo], looked_up: LookedUpFileInfo
             result = __attempt_better_match(result, name_parts.name, all_performers, namer_config)
             if name_parts.name:
                 result = __attempt_better_match(result, unidecode(name_parts.name), all_performers, namer_config)
+
+    # --- NEW DURATION CHECK LOGIC ---
+    # We check if local duration (from phash object) matches metadata duration within 5%
+    if phash and phash.duration and looked_up.duration:
+        local_dur = float(phash.duration)
+        remote_dur = float(looked_up.duration)
+        if remote_dur > 0:
+            diff = abs(local_dur - remote_dur)
+            # Allow 5% difference
+            if (diff / remote_dur) <= 0.05:
+                duration_match = True
+    # --------------------------------
+
     phash_distance, phash_duration = None, None
     if phash:
         hashes_distances: List[Tuple[int, bool]] = []
@@ -119,9 +134,11 @@ def __evaluate_match(name_parts: Optional[FileInfo], looked_up: LookedUpFileInfo
                             current_phash_duration_bool = False
                         hashes_distances.append((distance, current_phash_duration_bool))
             phash_distance, phash_duration = min(hashes_distances) if hashes_distances else (None, None)
+    
     return ComparisonResult(
         name=result[0], name_match=result[1], date_match=release_date, site_match=site, name_parts=name_parts,
-        looked_up=looked_up, phash_distance=phash_distance, phash_duration=phash_duration, jav_code_match=jav_code_match,
+        looked_up=looked_up, phash_distance=phash_distance, phash_duration=phash_duration, 
+        jav_code_match=jav_code_match, duration_match=duration_match # <--- Passed here
     )
 
 
@@ -394,11 +411,9 @@ def get_site_name(site_id: str, namer_config: NamerConfig) -> Optional[str]:
     json_response = __request_response_json_object(url, namer_config)
     if json_response and json_response.strip() != '':
         json_obj = orjson.loads(json_response)
-        # --- FIX IS HERE ---
-        # Changed from json_obj.data.name to json_obj['data']['name']
+        # --- FIXED ACCESS: Use dictionary syntax ['data']['name'] ---
         if 'data' in json_obj and 'name' in json_obj['data']:
             site = json_obj['data']['name']
-        # -------------------
     return site
 
 
@@ -437,14 +452,13 @@ def match(file_name_parts: Optional[FileInfo], namer_config: NamerConfig, phash:
             perfect_match = ComparisonResult(
                 name=looked_up_info.name or '', name_match=100.0, site_match=True, date_match=True,
                 name_parts=file_name_parts, looked_up=looked_up_info, phash_distance=None,
-                phash_duration=None, jav_code_match=True # Re-using this flag to signify a perfect match.
+                phash_duration=None, jav_code_match=True, duration_match=True # Re-using flags to signify a perfect match.
             )
             return ComparisonResults([perfect_match], file_name_parts)
         else:
             logger.warning("Direct lookup for TPDB ID {} failed on all endpoints. Falling back to normal search.", file_name_parts.tpdb_id)
 
     # --- ORIGINAL LOGIC (FALLBACK) ---
-    # If no tpdb_id was found, or if lookup failed, proceed with the normal search process.
     results: List[ComparisonResult] = []
     if not file_name_parts:
         results = __metadata_api_lookup_type(results, None, namer_config, SceneType.SCENE, phash)
@@ -453,13 +467,26 @@ def match(file_name_parts: Optional[FileInfo], namer_config: NamerConfig, phash:
     
     comparison_results = sorted(results, key=__match_weight, reverse=True)
 
-    if comparison_results and comparison_results[0].is_match() and not comparison_results[0].looked_up.tags:
-         uuid = comparison_results[0].looked_up.uuid
-         if uuid:
-            file_infos: Optional[LookedUpFileInfo] = get_complete_metadataapi_net_fileinfo(file_name_parts, uuid, namer_config)
-            if file_infos:
-                file_infos.original_query = comparison_results[0].looked_up.original_query
-                comparison_results[0].looked_up = file_infos
+    # --- NEW "3 OR LESS" RULE ---
+    # If we have 3 or fewer results, and the top result has a matching duration (within 5%),
+    # we force it to be considered a match even if the name score is slightly low.
+    if 0 < len(comparison_results) <= 3:
+        top_result = comparison_results[0]
+        if top_result.duration_match and top_result.site_match:
+             # Boost the name match score to ensure it passes the threshold (usually 94.9)
+             if top_result.name_match > 80.0:
+                 logger.info("Few results ({}) and duration matches. Boosting score for: {}", len(comparison_results), top_result.name)
+                 top_result.name_match = 96.0 
+    # ----------------------------
+
+    for comparison_result in comparison_results:
+        if comparison_result.is_match():
+            uuid = comparison_results[0].looked_up.uuid
+            if uuid:
+                file_infos: Optional[LookedUpFileInfo] = get_complete_metadataapi_net_fileinfo(file_name_parts, uuid, namer_config)
+                if file_infos:
+                    file_infos.original_query = comparison_results[0].looked_up.original_query
+                    comparison_results[0].looked_up = file_infos
 
     return ComparisonResults(comparison_results, file_name_parts)
 
